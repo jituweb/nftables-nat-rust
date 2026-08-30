@@ -44,7 +44,7 @@ impl From<ParseIntError> for ParseError {
 }
 
 // IP版本枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpVersion {
     V4,
     V6,
@@ -104,7 +104,7 @@ impl<'de> Deserialize<'de> for IpVersion {
 }
 
 // 协议枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Protocol {
     #[default]
     All,
@@ -113,7 +113,7 @@ pub enum Protocol {
 }
 
 // Drop链类型枚举
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Chain {
     #[default]
     Input,

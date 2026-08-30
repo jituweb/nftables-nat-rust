@@ -34,7 +34,13 @@ fi
 
 # 下载可执行文件
 echo "下载 nat 可执行文件..."
-curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/nat -o /tmp/nat
+RELEASE_URL="https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1"
+curl -sSLf "$RELEASE_URL/nat" -o /tmp/nat
+curl -sSLf "$RELEASE_URL/SHA256SUMS" -o /tmp/nat-SHA256SUMS
+(cd /tmp && grep '  nat$' nat-SHA256SUMS | sha256sum -c -) || {
+    echo "错误: nat 文件完整性校验失败"
+    exit 1
+}
 install /tmp/nat /usr/local/bin/nat
 
 # 根据配置类型设置不同的参数

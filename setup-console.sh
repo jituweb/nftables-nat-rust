@@ -37,8 +37,8 @@ NAT_SERVICE_FILE="/lib/systemd/system/nat.service"
 if [ ! -f "$NAT_SERVICE_FILE" ]; then
     echo "错误: 未检测到 NAT 服务"
     echo "请先安装 NAT 服务："
-    echo "  TOML 格式: bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup.sh) toml"
-    echo "  传统格式: bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup.sh) legacy"
+    echo "  TOML 格式: bash <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup.sh) toml"
+    echo "  传统格式: bash <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup.sh) legacy"
     exit 1
 fi
 
@@ -141,7 +141,7 @@ if [ -n "$USER_CERT_FILE" ] || [ -n "$USER_KEY_FILE" ]; then
 fi
 
 # 执行并保存变量
-. <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup-console-assets.sh)
+. <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup-console-assets.sh)
 echo INSTALL_PATH: $INSTALL_PATH
 
 # 配置项

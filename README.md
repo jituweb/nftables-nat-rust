@@ -60,13 +60,13 @@ systemctl disable --now iptables
 ### 方法一：TOML 配置文件版本（推荐）
 
 ```bash
-bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup.sh) toml
+bash <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup.sh) toml
 ```
 
 ### 方法二：传统配置文件版本
 
 ```bash
-bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup.sh) legacy
+bash <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup.sh) legacy
 ```
 
 ## 🆕 WebUI 管理界面
@@ -83,7 +83,7 @@ bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-r
 ### 安装管理界面 WebUI
 
 ```bash
-bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup-console.sh) # --host 0.0.0.0 -p 5533 -k /root/.acme.sh/arloor.dev/arloor.dev.key -c /root/.acme.sh/arloor.dev/fullchain.cer
+bash <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup-console.sh) # --host 0.0.0.0 -p 5533 -k /root/.acme.sh/arloor.dev/arloor.dev.key -c /root/.acme.sh/arloor.dev/fullchain.cer
 ```
 
 1. 安装过程会交互式提示输入用户名和密码。密码会保存在 systemd 文件中，注意安全。
@@ -101,7 +101,7 @@ bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-r
 ### 升级 WebUI
 
 ```bash
-bash <(curl -sSLf https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/setup-console-assets.sh)
+bash <(curl -sSLf https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1/setup-console-assets.sh)
 systemctl restart nat-console
 ```
 
@@ -400,16 +400,8 @@ nft list ruleset
 
 # 仅查看 NAT 表
 nft list table ip self-nat
-nft list table ip6 self-nat
-
-# 查看 DNAT map（端口 -> 目标）
-nft list map ip self-nat tcp_dnat
-nft list map ip self-nat tcp_dnat_ip
+nft list table ip6 self-nat6
 ```
-
-生成的 DNAT/REDIRECT 规则会匹配 `fib daddr type local`，只改写目的地址为本机的流量，避免劫持转发中的过路包。同一 family 的 SNAT 折叠为一条 `ct mark 0x4e4154 masquerade`。
-
-RANGE 原样转发进 `tcp_dnat_ip`/`udp_dnat_ip`（保留目的端口）。等宽平移不能放进 map：nftables 要求 map value 是 singleton，`53051-53080 : 1.2.3.4 . 51051-51080` 会失败，因此生成一条内核原生 interval DNAT：`dnat to 1.2.3.4:51051-51080`。
 
 ## 🔧 高级配置
 

@@ -1,9 +1,13 @@
 #![deny(warnings)]
+use crate::ip;
+use ipnetwork::IpNetwork;
 use log::info;
-use nat_common::{Chain, IpVersion, NftCell, ParseError, Protocol, TomlConfig};
+use nat_common::{range_dnat_ports, Chain, IpVersion, NftCell, ParseError, Protocol, TomlConfig};
+use std::env;
 use std::fmt::Display;
 use std::fs;
 use std::io;
+use std::str::FromStr;
 
 /// 运行时Cell，包装NftCell和Comment
 /// Comment仅用于运行时表示，不进入TOML配置
@@ -19,6 +23,380 @@ impl Display for RuntimeCell {
             RuntimeCell::Rule(cell) => write!(f, "{}", cell),
             RuntimeCell::Comment(content) => write!(f, "{}", content),
         }
+    }
+}
+
+/// Protocol扩展trait，提供nftables专用方法
+pub trait ProtocolExt {
+    fn nft_proto(&self) -> &str;
+}
+
+impl ProtocolExt for Protocol {
+    /// 返回nft规则中的协议部分
+    /// all类型返回"meta l4proto { tcp, udp } th"，匹配所有传输层协议
+    /// tcp/udp返回对应的协议名
+    fn nft_proto(&self) -> &str {
+        match self {
+            Protocol::All => "meta l4proto { tcp, udp } th",
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+        }
+    }
+}
+
+/// NftCell构建扩展trait，提供nftables规则构建方法
+pub trait NftCellBuilder {
+    fn build(&self) -> Result<String, io::Error>;
+}
+
+impl NftCellBuilder for NftCell {
+    fn build(&self) -> Result<String, io::Error> {
+        match self {
+            NftCell::Drop { .. } => build_drop_rule(self),
+            _ => {
+                let (domain, ip_version) = match &self {
+                    NftCell::Single {
+                        domain, ip_version, ..
+                    } => (domain, ip_version),
+                    NftCell::Range {
+                        domain, ip_version, ..
+                    } => (domain, ip_version),
+                    NftCell::Redirect { ip_version, .. } => {
+                        // Redirect doesn't need domain resolution
+                        return build_redirect_rules(self, ip_version);
+                    }
+                    NftCell::Drop { .. } => unreachable!(),
+                };
+
+                // 根据配置的IP版本解析目标IP
+                let dst_ip = ip::remote_ip(domain, ip_version)?;
+
+                let mut result = String::new();
+
+                // 检测实际IP类型并生成相应的规则
+                let is_ipv6_target = dst_ip.contains(':');
+
+                match ip_version {
+                    IpVersion::V4 => {
+                        if is_ipv6_target {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "IPv6 target address resolved but rule is configured for IPv4 only",
+                            ));
+                        }
+                        result += &build_nat_rules(self, &dst_ip, &IpVersion::V4)?;
+                    }
+                    IpVersion::V6 => {
+                        if !is_ipv6_target {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "IPv4 target address resolved but rule is configured for IPv6 only",
+                            ));
+                        }
+                        result += &build_nat_rules(self, &dst_ip, &IpVersion::V6)?;
+                    }
+                    IpVersion::All => {
+                        if is_ipv6_target {
+                            result += &build_nat_rules(self, &dst_ip, &IpVersion::V6)?;
+                        } else {
+                            result += &build_nat_rules(self, &dst_ip, &IpVersion::V4)?;
+                        }
+                    }
+                }
+
+                Ok(result)
+            }
+        }
+    }
+}
+
+impl RuntimeCell {
+    pub fn build(&self) -> Result<String, io::Error> {
+        match self {
+            RuntimeCell::Rule(cell) => cell.build(),
+            RuntimeCell::Comment(content) => Ok(content.clone() + "\n"),
+        }
+    }
+}
+
+/// 构建过滤规则的nftables脚本
+fn build_drop_rule(cell: &NftCell) -> Result<String, io::Error> {
+    let NftCell::Drop {
+        chain,
+        src_ip,
+        dst_ip,
+        src_port,
+        src_port_end,
+        dst_port,
+        dst_port_end,
+        protocol,
+        comment,
+    } = cell
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Expected Drop cell",
+        ));
+    };
+
+    let mut result = String::new();
+
+    // 判断IP版本：如果指定了src_ip或dst_ip，根据其判断family
+    // 如果没有指定IP地址，则在v4和v6中都添加规则
+    let mut ip_families = Vec::new();
+
+    if let Some(ip) = src_ip.as_ref().or(dst_ip.as_ref()) {
+        // 根据IP地址判断family
+        if let Ok(network) = IpNetwork::from_str(ip) {
+            if network.is_ipv6() {
+                ip_families.push(IpVersion::V6);
+            } else {
+                ip_families.push(IpVersion::V4);
+            }
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("无效的IP地址: {}", ip),
+            ));
+        }
+    } else {
+        // 没有指定IP地址，在v4和v6中都添加规则
+        ip_families.push(IpVersion::V4);
+        ip_families.push(IpVersion::V6);
+    }
+
+    for ip_version in ip_families {
+        result += &build_drop_rule_for_family(
+            cell,
+            chain,
+            src_ip,
+            dst_ip,
+            src_port,
+            src_port_end,
+            dst_port,
+            dst_port_end,
+            protocol,
+            comment,
+            &ip_version,
+        )?;
+    }
+
+    Ok(result)
+}
+
+/// 为特定IP family构建过滤规则
+#[allow(clippy::too_many_arguments)]
+fn build_drop_rule_for_family(
+    cell: &NftCell,
+    chain: &Chain,
+    src_ip: &Option<String>,
+    dst_ip: &Option<String>,
+    src_port: &Option<u16>,
+    src_port_end: &Option<u16>,
+    dst_port: &Option<u16>,
+    dst_port_end: &Option<u16>,
+    protocol: &Protocol,
+    comment: &Option<String>,
+    ip_version: &IpVersion,
+) -> Result<String, io::Error> {
+    let (family, ip_prefix) = match ip_version {
+        IpVersion::V4 => ("ip", "ip"),
+        IpVersion::V6 => ("ip6", "ip6"),
+        IpVersion::All => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IpVersion::All should be handled at caller level",
+            ));
+        }
+    };
+
+    let chain_name = match chain {
+        Chain::Input => "INPUT",
+        Chain::Forward => "FORWARD",
+    };
+
+    let mut conditions = Vec::new();
+
+    // 添加源IP条件（IP条件应该在协议条件之前）
+    if let Some(ip) = src_ip {
+        conditions.push(format!("{} saddr {}", ip_prefix, ip));
+    }
+
+    // 添加目标IP条件
+    if let Some(ip) = dst_ip {
+        conditions.push(format!("{} daddr {}", ip_prefix, ip));
+    }
+
+    // 添加协议条件
+    if *protocol != Protocol::All || src_port.is_some() || dst_port.is_some() {
+        let proto = protocol.nft_proto();
+        conditions.push(proto.to_string());
+    }
+
+    // 添加源端口条件
+    if let Some(port) = src_port {
+        if let Some(end) = src_port_end {
+            conditions.push(format!("sport {}-{}", port, end));
+        } else {
+            conditions.push(format!("sport {}", port));
+        }
+    }
+
+    // 添加目标端口条件
+    if let Some(port) = dst_port {
+        if let Some(end) = dst_port_end {
+            conditions.push(format!("dport {}-{}", port, end));
+        } else {
+            conditions.push(format!("dport {}", port));
+        }
+    }
+
+    let conditions_str = conditions.join(" ");
+    let comment_str = if let Some(cmt) = comment {
+        format!(" comment \"{}\"", cmt)
+    } else {
+        format!(" comment \"{}\"", cell)
+    };
+
+    let rule = format!(
+        "add rule {family} self-filter {chain_name} {conditions_str} counter drop{comment_str}\n\n"
+    );
+
+    Ok(rule)
+}
+
+fn build_nat_rules(
+    cell: &NftCell,
+    dst_ip: &str,
+    ip_version: &IpVersion,
+) -> Result<String, io::Error> {
+    let (family, env_var, localhost_addr, fmt_ip) = match ip_version {
+        IpVersion::V4 => ("ip", "nat_local_ip", "127.0.0.1", dst_ip.to_string()),
+        IpVersion::V6 => ("ip6", "nat_local_ipv6", "::1", format!("[{}]", dst_ip)),
+        IpVersion::All => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IpVersion::All should be handled at caller level",
+            ));
+        }
+    };
+
+    let snat_to_part = match env::var(env_var) {
+        Ok(ip) => "snat to ".to_owned() + &ip,
+        Err(_) => "masquerade".to_owned(),
+    };
+
+    match cell {
+        NftCell::Range {
+            port_start,
+            port_end,
+            dport,
+            protocol,
+            ..
+        } => {
+            let proto = protocol.nft_proto();
+            let (dest_start, dest_end) = range_dnat_ports(*port_start, *port_end, *dport)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let res = format!(
+                "add rule {family} self-nat PREROUTING ct state new {proto} dport {port_start}-{port_end} counter dnat to {fmt_ip}:{dest_start}-{dest_end} comment \"{cell}\"\n\
+                add rule {family} self-nat POSTROUTING ct state new {family} daddr {dst_ip} {proto} dport {dest_start}-{dest_end} counter {snat_to_part} comment \"{cell}\"\n\n\
+                ",
+            );
+            Ok(res)
+        }
+        NftCell::Single {
+            sport,
+            dport,
+            domain,
+            protocol,
+            ..
+        } => {
+            let proto = protocol.nft_proto();
+            let is_localhost = domain == "localhost" || domain == localhost_addr;
+            if is_localhost {
+                // 重定向到本机
+                let res = format!(
+                    "add rule {family} self-nat PREROUTING ct state new {proto} dport {sport} redirect to :{dport}  comment \"{cell}\"\n\n\
+                    ",
+                );
+                Ok(res)
+            } else {
+                // 转发到其他机器
+                let res = format!(
+                    "add rule {family} self-nat PREROUTING ct state new {proto} dport {sport} counter dnat to {fmt_ip}:{dport}  comment \"{cell}\"\n\
+                    add rule {family} self-nat POSTROUTING ct state new {family} daddr {dst_ip} {proto} dport {dport} counter {snat_to_part} comment \"{cell}\"\n\n\
+                    ",
+                );
+                Ok(res)
+            }
+        }
+        NftCell::Redirect { .. } => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Redirect cell should be built via build_redirect_rules",
+        )),
+        NftCell::Drop { .. } => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Drop cell should be built via build_drop_rule",
+        )),
+    }
+}
+
+fn build_redirect_rules(cell: &NftCell, ip_version: &IpVersion) -> Result<String, io::Error> {
+    let mut result = String::new();
+
+    match ip_version {
+        IpVersion::All => {
+            result += &build_redirect_rule(cell, &IpVersion::V4)?;
+            result += &build_redirect_rule(cell, &IpVersion::V6)?;
+        }
+        _ => {
+            result += &build_redirect_rule(cell, ip_version)?;
+        }
+    }
+
+    Ok(result)
+}
+
+fn build_redirect_rule(cell: &NftCell, ip_version: &IpVersion) -> Result<String, io::Error> {
+    let family = match ip_version {
+        IpVersion::V4 => "ip",
+        IpVersion::V6 => "ip6",
+        IpVersion::All => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IP version for redirect rule cannot be All",
+            ));
+        }
+    };
+    match cell {
+        NftCell::Redirect {
+            src_port,
+            src_port_end,
+            dst_port,
+            protocol,
+            ..
+        } => {
+            let proto = protocol.nft_proto();
+            let res = if let Some(end) = src_port_end {
+                // Range redirect
+                format!(
+                    "add rule {family} self-nat PREROUTING ct state new {proto} dport {src_port}-{src_port_end} redirect to :{dst_port} comment \"{cell}\"\n\n\
+                    ",
+                    src_port_end = end,
+                )
+            } else {
+                // Single port redirect
+                format!(
+                    "add rule {family} self-nat PREROUTING ct state new {proto} dport {src_port} redirect to :{dst_port} comment \"{cell}\"\n\n\
+                    ",
+                )
+            };
+            Ok(res)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Not a Redirect cell",
+        )),
     }
 }
 
@@ -282,5 +660,116 @@ mod redirect_parse_tests {
             }
             other => panic!("Expected Single variant, got {:?}", other),
         }
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod redirect_build_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_redirect_single_ipv4() {
+        let cell = NftCell::Redirect {
+            src_port: 8000,
+            src_port_end: None,
+            dst_port: 3128,
+            protocol: Protocol::All,
+            ip_version: IpVersion::V4,
+            comment: None,
+        };
+
+        let result = cell.build().unwrap();
+        // all协议使用th dport匹配所有传输层协议
+        assert!(result.contains("add rule ip self-nat PREROUTING ct state new meta l4proto { tcp, udp } th dport 8000 redirect to :3128"));
+        assert!(!result.contains("ip6")); // Should not have IPv6 rules
+    }
+
+    #[test]
+    fn test_build_redirect_range_ipv4() {
+        let cell = NftCell::Redirect {
+            src_port: 30001,
+            src_port_end: Some(39999),
+            dst_port: 45678,
+            protocol: Protocol::Tcp,
+            ip_version: IpVersion::V4,
+            comment: None,
+        };
+
+        let result = cell.build().unwrap();
+        // tcp协议只生成tcp规则
+        assert!(result.contains(
+            "add rule ip self-nat PREROUTING ct state new tcp dport 30001-39999 redirect to :45678"
+        ));
+        assert!(!result.contains("udp")); // tcp协议不应该包含udp规则
+        assert!(!result.contains("ip6")); // Should not have IPv6 rules
+    }
+
+    #[test]
+    fn test_build_redirect_both_ipv() {
+        let cell = NftCell::Redirect {
+            src_port: 5000,
+            src_port_end: None,
+            dst_port: 4000,
+            protocol: Protocol::All,
+            ip_version: IpVersion::All,
+            comment: None,
+        };
+
+        let result = cell.build().unwrap();
+        // all协议应该使用th dport，同时包含IPv4和IPv6
+        assert!(result.contains("add rule ip self-nat PREROUTING ct state new meta l4proto { tcp, udp } th dport 5000 redirect to :4000"));
+        assert!(
+            result.contains("add rule ip6 self-nat PREROUTING ct state new meta l4proto { tcp, udp } th dport 5000 redirect to :4000")
+        );
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+#[cfg(test)]
+mod range_build_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_range_identity_ipv4() {
+        let cell = NftCell::Range {
+            port_start: 20000,
+            port_end: 20100,
+            dport: None,
+            domain: "1.1.1.1".to_string(),
+            protocol: Protocol::Tcp,
+            ip_version: IpVersion::V4,
+            comment: None,
+        };
+
+        let result = cell.build().unwrap();
+        assert!(result.contains(
+            "add rule ip self-nat PREROUTING ct state new tcp dport 20000-20100 counter dnat to 1.1.1.1:20000-20100"
+        ));
+        assert!(result.contains(
+            "add rule ip self-nat POSTROUTING ct state new ip daddr 1.1.1.1 tcp dport 20000-20100 counter masquerade"
+        ));
+    }
+
+    #[test]
+    fn test_build_range_shift_ipv4() {
+        let cell = NftCell::Range {
+            port_start: 53051,
+            port_end: 53080,
+            dport: Some(51051),
+            domain: "123.123.123.123".to_string(),
+            protocol: Protocol::All,
+            ip_version: IpVersion::V4,
+            comment: None,
+        };
+
+        let result = cell.build().unwrap();
+        assert!(result.contains(
+            "add rule ip self-nat PREROUTING ct state new meta l4proto { tcp, udp } th dport 53051-53080 counter dnat to 123.123.123.123:51051-51080"
+        ));
+        assert!(result.contains(
+            "add rule ip self-nat POSTROUTING ct state new ip daddr 123.123.123.123 meta l4proto { tcp, udp } th dport 51051-51080 counter masquerade"
+        ));
+        assert!(!result.contains("th dport 53051-53080 counter masquerade"));
     }
 }
