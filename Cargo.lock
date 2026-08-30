@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "nat-cli"
-version = "2.0.0"
+version = "2.0.1-jitu.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "nat-common"
-version = "2.0.0"
+version = "2.0.1-jitu.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "nat-console"
-version = "2.0.0"
+version = "2.0.1-jitu.1"
 dependencies = [
  "anyhow",
  "axum",

@@ -3,7 +3,6 @@
 #![deny(clippy::expect_used)]
 mod config;
 mod ip;
-mod nft;
 mod prepare;
 
 use clap::Parser;
@@ -258,7 +257,49 @@ fn handle_loop(args: &Args) -> Result<(), io::Error> {
 }
 
 fn build_new_script(nat_cells: &[config::RuntimeCell]) -> Result<String, io::Error> {
-    nft::build_script(nat_cells)
+    //脚本的前缀 - 创建IPv4和IPv6表
+    let mut script = String::from(
+        "#!/usr/sbin/nft -f\n\
+        \n\
+        # IPv4 NAT table\n\
+        add table ip self-nat\n\
+        delete table ip self-nat\n\
+        add table ip self-nat\n\
+        add chain ip self-nat PREROUTING { type nat hook prerouting priority -110 ; }\n\
+        add chain ip self-nat POSTROUTING { type nat hook postrouting priority 110 ; }\n\
+        \n\
+        # IPv6 NAT table\n\
+        add table ip6 self-nat\n\
+        delete table ip6 self-nat\n\
+        add table ip6 self-nat\n\
+        add chain ip6 self-nat PREROUTING { type nat hook prerouting priority -110 ; }\n\
+        add chain ip6 self-nat POSTROUTING { type nat hook postrouting priority 110 ; }\n\
+        \n\
+        # IPv4 Drop table\n\
+        add table ip self-filter\n\
+        delete table ip self-filter\n\
+        add table ip self-filter\n\
+        add chain ip self-filter INPUT { type filter hook input priority filter - 1 ; }\n\
+        add chain ip self-filter FORWARD { type filter hook forward priority filter - 1 ; }\n\
+        \n\
+        # IPv6 Drop table\n\
+        add table ip6 self-filter\n\
+        delete table ip6 self-filter\n\
+        add table ip6 self-filter\n\
+        add chain ip6 self-filter INPUT { type filter hook input priority filter - 1 ; }\n\
+        add chain ip6 self-filter FORWARD { type filter hook forward priority filter - 1 ; }\n\
+        ",
+    );
+
+    for x in nat_cells.iter() {
+        match x.build() {
+            Ok(rule) => script += &rule,
+            Err(e) => {
+                log::error!("Failed to build rule for {x:?}: {e}");
+            }
+        }
+    }
+    Ok(script)
 }
 
 #[cfg(test)]

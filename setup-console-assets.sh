@@ -1,6 +1,7 @@
 # 下载 nat-console
 echo "下载 nat-console..."
-DOWNLOAD_URL="https://us.arloor.dev/https://github.com/arloor/nftables-nat-rust/releases/download/v2.0.0/nat-console"
+RELEASE_URL="https://us.arloor.dev/https://github.com/jituweb/nftables-nat-rust/releases/download/v2.0.1-jitu.1"
+DOWNLOAD_URL="$RELEASE_URL/nat-console"
 TMP_FILE="/tmp/nat-console"
 INSTALL_PATH="/usr/local/bin/nat-console"
 
@@ -9,6 +10,12 @@ if [ $? -ne 0 ]; then
     echo "错误: 下载 nat-console 失败"
     exit 1
 fi
+
+curl -sSLf "$RELEASE_URL/SHA256SUMS" -o /tmp/nat-console-SHA256SUMS
+(cd /tmp && grep '  nat-console$' nat-console-SHA256SUMS | sha256sum -c -) || {
+    echo "错误: nat-console 文件完整性校验失败"
+    exit 1
+}
 
 # 安装到 /usr/local/bin
 echo "安装 nat-console 到 $INSTALL_PATH..."
