@@ -41,5 +41,6 @@ jobs:
           version=$(grep -E ^version Cargo.toml|awk -F "[\"]" '{print $2}')
           version="v${version}"
           release_dir="${{ steps.build_zigbuild.outputs.release_dir }}"
-          (cd "$release_dir" && sha256sum nat nat-console > SHA256SUMS)
-          gh release create "$version" "$release_dir/nat" "$release_dir/nat-console" "$release_dir/SHA256SUMS" setup.sh setup-console.sh setup-console-assets.sh -n "$version" -t "$version" --latest
+          sha256sum "$release_dir/nat" | awk '{print $1 "  nat"}' > SHA256SUMS
+          sha256sum "$release_dir/nat-console" | awk '{print $1 "  nat-console"}' >> SHA256SUMS
+          gh release create "$version" "$release_dir/nat" "$release_dir/nat-console" SHA256SUMS setup.sh setup-console.sh setup-console-assets.sh -n "$version" -t "$version" --latest
